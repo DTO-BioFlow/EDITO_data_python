@@ -15,6 +15,7 @@ These scripts are tutorials for the DTO-Bioflow project. It contains following c
 | 3.write_personal_s3.ipynb                                   | [Willem Boone](https://github.com/willem0boone)   | Write data to your personal storage  		|
 | 4.read_personal_s3.ipynb                                    | [Willem Boone](https://github.com/willem0boone)   | Read data from your personal storage  		|
 | 5.find_CMEMS_physics_reanalysis_salinity_temperatures.ipynb | [Marjahn Finlayson](https://github.com/MarjahnF)  | Find and read CMEMS physics reanalysis data   	|
+| 6_search_dataset_koster.ipynb				      | [Willem Boone](https://github.com/willem0boone)   | Find koster dataset using stac item title    	|
 
 
 
