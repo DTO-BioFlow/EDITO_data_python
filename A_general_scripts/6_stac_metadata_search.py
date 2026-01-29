@@ -2,12 +2,18 @@
 """
 ## Simple STAC substring search (Python equivalent of `stac_metadata_search.sh`)
 
+This script mirrors the Bash helper by fetching collection/item pages from the EDITO STAC
+API and scanning every string value in the response JSON for the provided substring. Client-side
+filtering (via `--collections` patterns or `--all-collections`) and request pagination are handled
+entirely in RAM before the final JSON/CSV export, and no extra data is persisted to the server.
+
 The fastest “just search the JSON” workflow is `stac_metadata_search.py`. It:
 - lists collections from the EDITO STAC API
-- optionally filters collections by a regex over common collection fields
-- scans `/collections/{id}/items` and matches your substring against **any string value** in the item JSON
+- optionally filters those collections via `--collections` regex patterns before scanning
+- scans `/collections/{id}/items` and matches the query against **any string value** in the item JSON
 - additionally reports which **assets** matched by `key`, `title`, or `href`
-
+- additionally reports the **product identifier** and **item title** of the STAC item
+- chooses the best output format based on the `--format` argument (json or csv)
 Examples:
 
 ```bash
@@ -17,22 +23,37 @@ python 6_stac_metadata_search.py --list-collections
 # Search ALL collections for a simple substring (like your bash example)
 python 6_stac_metadata_search.py "Koster historical" --all-collections
 
-# Fast default (like `searchdataset.sh`): scan “biology-ish” collections
+# Fast default (like `searchdataset.sh`): scan all collections
 python 6_stac_metadata_search.py "Koster historical"
 
-# Restrict collections with a regex (optional)
-python 6_stac_metadata_search.py "gbif.org" --col-terms-regex "biology|bio|biodiversity|ecology"
+# Restrict collections with a regex-like pattern (optional)
+python 6_stac_metadata_search.py "gbif.org" --collections "biology|bio|ecology"
 
-# Find a STAC item by a substring of an asset URL (client-side scan)
+# search for acoustic|tracking|ecology in collections and "acoustic" in items save to csv with title "acoustic"
+python 6_stac_metadata_search.py "acoustic" --collections "acoustic|tracking|ecology" --format csv --title "acoustic"
+
+# Scan stac items in all collections for "ipt.gbif.org.nz/resource?r=koster_historica"
 python 6_stac_metadata_search.py "ipt.gbif.org.nz/resource?r=koster_historica"
 
 # Only scan specific collections (comma-separated)
-python 6_stac_metadata_search.py "Koster historical" --collections "some-collection-id,another-collection-id"
+python 6_stac_metadata_search.py "Koster historical" --collections "bio|ecology|biology"
+
+# Save the results to a file with the title "Koster historical" in json format
+python 6_stac_metadata_search.py "Koster historical" --title "Koster historical"
+
+# Save the results to a file with the title "myDOI" in json format
+python 6_stac_metadata_search.py "doi.org/10.5281" --title "myDOI" --format json
+
+# Save the results to a file with the title "myDOI" in csv format
+python 6_stac_metadata_search.py "doi.org/10.5281" --title "myDOI" --format csv
+
+# Do deep search and set max pages to 100 (200 records x 100 pages = 20,000 records per collection) takes forever
+python 6_stac_metadata_search.py "Koster historical" --max-pages 100
 ```
 
 Notes:
 - `BASE` can be overridden via env var, same as the bash script: `BASE="https://api.dive.edito.eu/data" ...`
-- The server-side STAC `/search` supports many parameters; see the OpenAPI docs at `https://rest.wiki/?https://api.dive.edito.eu/data/api`.
+- The server-side STAC `/search` does support some parameters; see the OpenAPI docs at `https://rest.wiki/?https://api.dive.edito.eu/data/api`.
 """
 
 from __future__ import annotations
@@ -40,6 +61,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import os
 import re
 import sys
@@ -52,14 +74,19 @@ import requests
 
 
 DEFAULT_BASE = "https://api.dive.edito.eu/data"
-DEFAULT_OUTPUT_DIR = Path("data/stac_dataset_search")
-DEFAULT_COL_TERMS_REGEX = "biology|bio|biodiversity|ecology"
+DEFAULT_OUTPUT_DIR = Path("data/stac_metadata_search")
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger(__name__)
 
 
 def _compile_optional_regex(pattern: Optional[str]) -> Optional[re.Pattern[str]]:
     if not pattern:
         return None
-    return re.compile(pattern, flags=re.IGNORECASE)
+    try:
+        return re.compile(pattern, flags=re.IGNORECASE)
+    except re.error:
+        return re.compile(re.escape(pattern), flags=re.IGNORECASE)
 
 
 def _iter_strings(value: Any) -> Iterable[str]:
@@ -87,6 +114,7 @@ def _contains_term(value: Any, term_lower: str) -> bool:
 
 
 def _collection_matches(collection: dict[str, Any], rx: re.Pattern[str]) -> bool:
+    """Return true when the regex matches IDs, titles, descriptions, keywords, or summaries."""
     # Mirror the bash script: search in common fields.
     candidates: list[str] = []
     for key in ("id", "title", "description"):
@@ -129,6 +157,8 @@ def _viewer_url(collection_id: str, item_id: str) -> str:
 class Match:
     item_id: str
     collection: str
+    product_identifier: str
+    item_title: str
     datetime: str | None
     api_item_url: str
     viewer_url: str
@@ -149,6 +179,7 @@ def _extract_datetime(feature: dict[str, Any]) -> str | None:
 
 
 def _matching_assets(feature: dict[str, Any], term_rx: re.Pattern[str]) -> list[dict[str, Any]]:
+    """Capture assets whose key/title/href match the query regex, mirroring the printed hit context."""
     assets = feature.get("assets") or {}
     if not isinstance(assets, dict):
         return []
@@ -208,6 +239,8 @@ def _save_results_csv(path: Path, matches: list[Match]) -> None:
             [
                 "collection",
                 "item_id",
+                "product_identifier",
+                "item_title",
                 "datetime",
                 "api_item_url",
                 "viewer_url",
@@ -219,6 +252,8 @@ def _save_results_csv(path: Path, matches: list[Match]) -> None:
                 [
                     match.collection,
                     match.item_id,
+                    match.product_identifier or "",
+                    match.item_title or "",
                     match.datetime or "",
                     match.api_item_url,
                     match.viewer_url,
@@ -254,6 +289,14 @@ def _scan_collection_items(
     max_pages: int,
     stop_on_first_hit: bool,
 ) -> tuple[list[Match], int]:
+    """Page through `/collections/{id}/items`, scan every string value for the query, and stop per CLI caps."""
+    logger.debug(
+        "Preparing scan for collection %s (limit=%d/max_pages=%d/stop=%s)",
+        collection_id,
+        limit_per_page,
+        max_pages,
+        stop_on_first_hit,
+    )
     term_lower = query.lower()
     term_rx = re.compile(re.escape(query), flags=re.IGNORECASE)
 
@@ -264,6 +307,7 @@ def _scan_collection_items(
 
     while next_url and page < max_pages:
         page += 1
+        logger.debug("Fetching collection %s page %d", collection_id, page)
         r = session.get(next_url, timeout=60)
         r.raise_for_status()
         fc = r.json()
@@ -280,13 +324,17 @@ def _scan_collection_items(
                 continue
 
             item_id = str(feature.get("id", ""))
-            if not item_id:
+            product_identifier = str(feature.get("properties", {}).get("productIdentifier", ""))
+            item_title = str(feature.get("properties", {}).get("title", ""))
+            if not item_id or not product_identifier or not item_title:
                 continue
             item_collection = str(feature.get("collection") or collection_id)
 
             page_matches.append(
                 Match(
                     item_id=item_id,
+                    product_identifier=product_identifier,
+                    item_title=item_title,
                     collection=item_collection,
                     datetime=_extract_datetime(feature),
                     api_item_url=f"{base}/collections/{item_collection}/items/{item_id}",
@@ -307,6 +355,13 @@ def _scan_collection_items(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for the substring search workflow.
+
+    It parses user inputs (query, collection filters, pagination caps, output preferences)
+    and drives the page-by-page STAC item scan, stopping early if requested.
+    Unlike the STAC `/search` endpoint, collection filtering and substring matching are
+    handled locally via regex matching and client-side evaluation of every string value.
+    """
     parser = argparse.ArgumentParser(
         prog="6_stac_metadata_search.py",
         description="Simple substring search over EDITO STAC collections/items (Python version of 6_stac_metadata_search.sh).",
@@ -325,25 +380,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--collections",
         default="",
-        help="Comma-separated collection ids to scan. If omitted, scans all (or those matched by --col-terms-regex).",
+        help=(
+            "Comma-separated collection patterns to scan. "
+            "Each pattern is treated as a regex against id/title/description/keywords/summaries."
+        ),
     )
     parser.add_argument(
         "--all-collections",
         action="store_true",
-        help="Ignore --col-terms-regex and scan all collections (unless --collections is provided).",
-    )
-    parser.add_argument(
-        "--col-terms-regex",
-        default=os.environ.get("COL_TERMS_REGEX", DEFAULT_COL_TERMS_REGEX),
-        help=(
-            "Regex to filter collections by id/title/description/keywords/summaries before scanning items. "
-            f"Default: {DEFAULT_COL_TERMS_REGEX} (or env COL_TERMS_REGEX)."
-        ),
+        help="Scan every collection, ignoring --collections filters.",
     )
     parser.add_argument(
         "--list-collections",
         action="store_true",
-        help="List the selected collections (after applying --collections/--col-terms-regex) and exit.",
+        help="List the selected collections (after applying --collections filters) and exit.",
     )
     parser.add_argument(
         "--limit-per-page",
@@ -360,8 +410,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--stop-on-first-hit",
         action=argparse.BooleanOptionalAction,
-        default=(os.environ.get("STOP_ON_FIRST_HIT", "1") != "0"),
-        help="Stop scanning a collection after the first page with matches (default: enabled).",
+        default=(os.environ.get("STOP_ON_FIRST_HIT", "0") != "0"),
+        help="Stop scanning a collection after the first page with matches (default: disabled).",
     )
     parser.add_argument(
         "--format",
@@ -384,39 +434,43 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
-
-    explicit_collections = [c.strip()
-                            for c in args.collections.split(",") if c.strip()]
-    rx = None if args.all_collections else _compile_optional_regex(
-        args.col_terms_regex)
+    collection_terms = [c.strip() for c in args.collections.split(",") if c.strip()]
 
     with requests.Session() as session:
         all_collections = _get_collections(session, args.base)
+        logger.info("Fetched %d collections from %s", len(all_collections), args.base)
 
-        # Determine which collections to scan.
+        # Determine which collections to scan based on --collections patterns or --all-collections.
         selected: list[dict[str, Any]]
-        if explicit_collections:
-            wanted = set(explicit_collections)
-            selected = [c for c in all_collections if str(
-                c.get("id", "")) in wanted]
-        elif rx is not None:
-            selected = [
-                c for c in all_collections if _collection_matches(c, rx)]
-        else:
+        if args.all_collections or not collection_terms:
             selected = list(all_collections)
+            logger.info("Selecting all %d collections", len(selected))
+        else:
+            seen: set[str] = set()
+            selected = []
+            logger.info("Selecting collections matching patterns: %s", ", ".join(collection_terms))
+            for term in collection_terms:
+                rx = _compile_optional_regex(term)
+                if rx is None:
+                    continue
+                for coll in all_collections:
+                    cid = str(coll.get("id", "")).strip()
+                    if not cid or cid in seen:
+                        continue
+                    if _collection_matches(coll, rx):
+                        selected.append(coll)
+                        seen.add(cid)
+            logger.info("Selected %d collections", len(selected))
 
         if not selected:
             print("No collections selected.")
             return 0
 
         if args.list_collections or not args.query:
-            if rx is not None:
-                print(
-                    f"== Collections matching regex: {args.col_terms_regex} ==")
-            elif explicit_collections:
-                print("== Selected collections (explicit) ==")
-            else:
+            if args.all_collections or not collection_terms:
                 print("== All collections ==")
+            else:
+                print(f"== Collections matching: {args.collections} ==")
             _print_collection_list(selected)
 
             if not args.query:
@@ -426,22 +480,29 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         print(f"== Now scanning items/assets for: {args.query} ==")
-        if rx is not None:
-            print(f"(Collections filtered by regex: {args.col_terms_regex})")
-        elif explicit_collections:
-            print("(Collections selected explicitly)")
-        else:
+        if args.all_collections or not collection_terms:
             print("(All collections)")
+        else:
+            print(f"(Collections matching: {args.collections})")
         print()
 
         total_hits = 0
         all_matches: list[Match] = []
+        # Walk through each selected collection and run the substring scan until pagination 
+        # limits or if `--stop-on-first-hit` is enabled.
         for c in selected:
             cid = str(c.get("id", "")).strip()
             if not cid:
                 continue
             print("-" * 80)
             print(f"COLLECTION: {cid}")
+            logger.info(
+                "Scanning collection %s (limit=%d, max_pages=%d, stop_on_first=%s)",
+                cid,
+                args.limit_per_page,
+                args.max_pages,
+                args.stop_on_first_hit,
+            )
             collection_matches, hits = _scan_collection_items(
                 session=session,
                 base=args.base,
@@ -472,26 +533,22 @@ def main(argv: list[str] | None = None) -> int:
         if total_hits == 0:
             print("No matches found.")
 
+        # Persist search metadata/results using the CLI's output/path settings.
         output_path = _determine_output_path(args)
+        filter_mode = (
+            "all"
+            if args.all_collections or not collection_terms
+            else "collections"
+        )
+        filter_value = collection_terms if filter_mode == "collections" else None
+
         metadata = {
             "generated_at": datetime.utcnow().isoformat(),
             "base": args.base,
             "query": args.query,
             "format": args.format,
-            "filter_mode": (
-                "explicit"
-                if explicit_collections
-                else "regex"
-                if rx is not None
-                else "all"
-            ),
-            "filter_value": (
-                explicit_collections
-                if explicit_collections
-                else args.col_terms_regex
-                if rx is not None
-                else None
-            ),
+            "filter_mode": filter_mode,
+            "filter_value": filter_value,
             "limit_per_page": args.limit_per_page,
             "max_pages": args.max_pages,
             "stop_on_first_hit": args.stop_on_first_hit,
@@ -511,6 +568,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _save_results_csv(output_path, all_matches)
 
+        logger.info("Wrote %d matches to %s", len(all_matches), output_path)
         print(f"Results written to {output_path}")
         return 0
 

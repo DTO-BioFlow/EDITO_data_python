@@ -17,4 +17,5 @@ dependencies = [
     "contextily",
     "pyarrow",
     "copernicusmarine",
+    "pip>=25.3",
 ]
