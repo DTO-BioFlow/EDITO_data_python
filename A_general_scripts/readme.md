@@ -10,7 +10,8 @@
 | 3_search_biooracle_stac_zarr_assets.py| [Samuel Fooks](https://github.com/samuelfooks )   | Connects to a static json STAC and gets ARCO datasets (assets).             |
 | 4_search_edito_stac_zarr_assets.ipynb | [Samuel Fooks](https://github.com/samuelfooks )   | Search a STAC conformant API for ARCO datasets (assets).           |
 | 5_subsetting_arco_data.ipynb          | [Samuel Fooks](https://github.com/samuelfooks )   | Open the CSV file containing the URLs of the ARCO assets.  Open a few ARCO datasets and interactively subset the dataset based on the variables, dimensions, and time range of interest.  Then plot the subsetted rasters to do basic visual analysis             |
-
+| 6_stac_metadata_search.py             | [Samuel Fooks](https://github.com/samuelfooks )   | Simple, client-side substring search over the EDITO STAC API: list/filter collections, scan `/collections/{id}/items`, and report matching items + matching assets (by key/title/href). Can save results as JSON/CSV. |
+| 6_stac_metadata_search.sh             | [Samuel Fooks](https://github.com/samuelfooks )   | Bash version of the same workflow (uses `curl` + `jq`) with optional collection filtering, pagination controls, and JSON/CSV output (see `data/stac_metadata_search/` for example outputs). |
 
 ## Videos
 ### STAC browser
